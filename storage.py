@@ -1,0 +1,3 @@
+
+coins = {}
+last_alert = {}
