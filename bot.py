@@ -8,9 +8,14 @@ from config import BOT_TOKEN, CHECK_INTERVAL, ALERT_THRESHOLD
 from dex import get_usdt_pair
 from analyzer import anti_rug_score, is_pump
 from storage import coins, last_alert
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не задан в переменных окружения")
+
+BOT_TOKEN = BOT_TOKEN.strip()  # 🔥 ВАЖНО
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
-BOT_TOKEN = BOT_TOKEN.strip()
+
 DEX_REGEX = r"0x[a-fA-F0-9]{40}"
 
 @bot.message_handler(commands=["start"])
