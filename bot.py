@@ -8,7 +8,7 @@ from config import BOT_TOKEN, CHECK_INTERVAL, ALERT_THRESHOLD
 from dex import get_usdt_pair
 from analyzer import anti_rug_score, is_pump
 from storage import coins, last_alert
-
+BOT_TOKEN = BOT_TOKEN.strip()
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
 DEX_REGEX = r"0x[a-fA-F0-9]{40}"
