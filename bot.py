@@ -6,6 +6,7 @@ import requests
 import telebot
 from telebot.types import *
 
+# ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
@@ -13,38 +14,40 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
 DATA_FILE = "data.json"
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 60  # сек
+ALERT_WINDOW = 3600  # 1 час
 
 # ================= STORAGE =================
-def load_data():
+def load():
     if not os.path.exists(DATA_FILE):
         return {}
     with open(DATA_FILE, "r") as f:
         return json.load(f)
 
-def save_data(d):
+def save():
     with open(DATA_FILE, "w") as f:
-        json.dump(d, f, indent=2)
+        json.dump(DB, f, indent=2)
 
-data = load_data()
+DB = load()
 
 def user(uid):
     uid = str(uid)
-    if uid not in data:
-        data[uid] = {"coins": {}}
-    return data[uid]
+    if uid not in DB:
+        DB[uid] = {"coins": {}}
+    return DB[uid]
 
 # ================= UI =================
 def main_menu():
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("➕ Добавить монету")
-    kb.add("📊 Мои монеты")
+    kb.add("📊 Мои монеты", "⚙️ Настройки")
     return kb
 
-def coin_kb(addr, chain, url):
+def coin_buttons(chain, pair, url):
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("🔗 Dex", url=url))
-    kb.add(InlineKeyboardButton("❌ Удалить", callback_data=f"del:{chain}:{addr}"))
+    kb.add(InlineKeyboardButton("🔗 DEX", url=url))
+    kb.add(InlineKeyboardButton("⚙️ Алерт %", callback_data=f"alert:{chain}:{pair}"))
+    kb.add(InlineKeyboardButton("❌ Удалить", callback_data=f"del:{chain}:{pair}"))
     return kb
 
 # ================= START =================
@@ -52,23 +55,26 @@ def coin_kb(addr, chain, url):
 def start(m):
     bot.send_message(
         m.chat.id,
-        "🤖 *MemCoin Scanner*\n\n"
-        "• Алерты по %\n"
-        "• Детект пампа\n"
-        "• Anti-rug (скоро)\n\n"
-        "Нажми ➕ Добавить монету и пришли ссылку DexScreener",
+        "🤖 *MemCoinScanner*\n\n"
+        "• Любые сети (ETH / BSC / BASE / ARB)\n"
+        "• Только USDT пары\n"
+        "• Алерты > X% за 1 час\n\n"
+        "Нажми ➕ *Добавить монету* и пришли ссылку DexScreener",
         reply_markup=main_menu()
     )
 
-# ================= ADD =================
+# ================= ADD FLOW =================
 @bot.message_handler(func=lambda m: m.text == "➕ Добавить монету")
-def ask(m):
+def ask_link(m):
     bot.send_message(m.chat.id, "🔗 Пришли ссылку DexScreener")
 
 @bot.message_handler(func=lambda m: "dexscreener.com" in m.text.lower())
 def add_coin(m):
     try:
-        parts = m.text.strip().split("/")
+        # Telegram preview-safe
+        text = m.text.strip().split()[0]
+        parts = text.split("/")
+
         chain = parts[-2]
         pair = parts[-1]
 
@@ -82,84 +88,101 @@ def add_coin(m):
         p = r["pair"]
 
         if p["quoteToken"]["symbol"] != "USDT":
-            bot.send_message(m.chat.id, "❌ Только USDT пары")
+            bot.send_message(m.chat.id, "❌ Поддерживаются только USDT пары")
             return
 
         u = user(m.chat.id)
+
         u["coins"][pair] = {
             "chain": chain,
             "symbol": p["baseToken"]["symbol"],
             "price": float(p["priceUsd"]),
-            "url": p["url"],
+            "last_price": float(p["priceUsd"]),
             "alert": 10,
-            "last": float(p["priceUsd"]),
-            "last_alert": 0
+            "last_alert": 0,
+            "url": p["url"]
         }
 
-        save_data(data)
+        save()
 
         bot.send_message(
             m.chat.id,
             f"✅ *{p['baseToken']['symbol']}* добавлена\n"
             f"💰 ${p['priceUsd']}",
-            reply_markup=coin_kb(pair, chain, p["url"])
+            reply_markup=coin_buttons(chain, pair, p["url"])
         )
 
     except Exception as e:
-        bot.send_message(m.chat.id, f"❌ Ошибка добавления")
+        bot.send_message(m.chat.id, "❌ Ошибка добавления монеты")
 
 # ================= LIST =================
 @bot.message_handler(func=lambda m: m.text == "📊 Мои монеты")
-def list_coins(m):
+def my_coins(m):
     u = user(m.chat.id)
     if not u["coins"]:
-        bot.send_message(m.chat.id, "Монет нет")
+        bot.send_message(m.chat.id, "Монет пока нет")
         return
 
-    for addr, c in u["coins"].items():
+    for pair, c in u["coins"].items():
         bot.send_message(
             m.chat.id,
-            f"🪙 *{c['symbol']}*\nАлерт: {c['alert']}%",
-            reply_markup=coin_kb(addr, c["chain"], c["url"])
+            f"🪙 *{c['symbol']}*\n"
+            f"Алерт: {c['alert']}%",
+            reply_markup=coin_buttons(c["chain"], pair, c["url"])
         )
 
-# ================= DELETE =================
+# ================= CALLBACKS =================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("del"))
-def delete(c):
-    _, chain, addr = c.data.split(":")
+def delete_coin(c):
+    _, chain, pair = c.data.split(":")
     u = user(c.message.chat.id)
-    if addr in u["coins"]:
-        del u["coins"][addr]
-        save_data(data)
-        bot.edit_message_text("❌ Удалено", c.message.chat.id, c.message.message_id)
+    if pair in u["coins"]:
+        del u["coins"][pair]
+        save()
+        bot.edit_message_text("❌ Монета удалена", c.message.chat.id, c.message.message_id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("alert"))
+def change_alert(c):
+    msg = bot.send_message(c.message.chat.id, "✏️ Введи процент алерта (например 15)")
+    bot.register_next_step_handler(msg, set_alert, c.data)
+
+def set_alert(m, data):
+    try:
+        _, chain, pair = data.split(":")
+        value = float(m.text)
+        u = user(m.chat.id)
+        u["coins"][pair]["alert"] = value
+        save()
+        bot.send_message(m.chat.id, f"✅ Алерт установлен: {value}%")
+    except:
+        bot.send_message(m.chat.id, "❌ Неверное значение")
 
 # ================= WATCHER =================
 def watcher():
     while True:
-        for uid, u in data.items():
-            for addr, c in u["coins"].items():
+        for uid, u in DB.items():
+            for pair, c in u["coins"].items():
                 try:
-                    api = f"https://api.dexscreener.com/latest/dex/pairs/{c['chain']}/{addr}"
+                    api = f"https://api.dexscreener.com/latest/dex/pairs/{c['chain']}/{pair}"
                     r = requests.get(api, timeout=10).json()
                     if "pair" not in r:
                         continue
 
                     price = float(r["pair"]["priceUsd"])
-                    diff = ((price - c["last"]) / c["last"]) * 100
+                    diff = ((price - c["last_price"]) / c["last_price"]) * 100
                     now = time.time()
 
-                    if abs(diff) >= c["alert"] and now - c["last_alert"] > 3600:
+                    if abs(diff) >= c["alert"] and now - c["last_alert"] >= ALERT_WINDOW:
                         bot.send_message(
                             uid,
                             f"🚨 *{c['symbol']}*\n"
                             f"Цена: ${price:.6f}\n"
                             f"Изм: {diff:.2f}%",
-                            reply_markup=coin_kb(addr, c["chain"], c["url"])
+                            reply_markup=coin_buttons(c["chain"], pair, c["url"])
                         )
                         c["last_alert"] = now
-                        c["last"] = price
-                        save_data(data)
-
+                        c["last_price"] = price
+                        save()
                 except:
                     pass
         time.sleep(CHECK_INTERVAL)
