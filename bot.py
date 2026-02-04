@@ -84,4 +84,13 @@ def watcher():
 
 threading.Thread(target=watcher, daemon=True).start()
 
-bot.infinity_polling(skip_pending=True)
+# --- START BOT ---
+
+bot.remove_webhook()
+print("🤖 Bot polling started")
+
+bot.infinity_polling(
+    skip_pending=True,
+    timeout=60,
+    long_polling_timeout=60
+)
