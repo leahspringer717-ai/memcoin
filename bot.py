@@ -1,4 +1,4 @@
-
+import os
 import telebot
 import re
 import time
@@ -9,7 +9,13 @@ from dex import get_usdt_pair
 from analyzer import anti_rug_score, is_pump
 from storage import coins, last_alert
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-BOT_TOKEN = BOT_TOKEN.strip().replace("\n","").replace("\r","").replace(" ","")
+
+print("BOT_TOKEN from env:", BOT_TOKEN)  # 👈 временно для лога
+
+if BOT_TOKEN is None:
+    raise RuntimeError("❌ BOT_TOKEN is None. Railway env var not injected")
+
+BOT_TOKEN = BOT_TOKEN.strip()
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
 DEX_REGEX = r"0x[a-fA-F0-9]{40}"
