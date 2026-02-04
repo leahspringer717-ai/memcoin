@@ -7,6 +7,7 @@ import requests
 import telebot
 from telebot import types
 
+
 # ================= CONFIG =================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
