@@ -7,23 +7,22 @@ import requests
 import telebot
 from telebot import types
 
-# ================== CONFIG ==================
+# ================= CONFIG =================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not found")
+    raise RuntimeError("BOT_TOKEN not set")
 
 BOT_TOKEN = BOT_TOKEN.strip()
 
 DEX_API = "https://api.dexscreener.com/latest/dex/pairs"
 DATA_FILE = "coins.json"
 
-PRICE_CHECK_INTERVAL = 300   # 5 минут
-ALERT_THRESHOLD = 10         # %
+CHECK_INTERVAL = 300  # 5 минут
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
-# ================== STORAGE ==================
+# ================= STORAGE =================
 
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r") as f:
@@ -32,169 +31,204 @@ else:
     tracked = {}
 
 
-def save_data():
+def save():
     with open(DATA_FILE, "w") as f:
         json.dump(tracked, f, indent=2)
 
 
-# ================== UI ==================
+# ================= UI =================
 
 def main_menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("➕ Добавить монету")
-    kb.add("📊 Мои монеты")
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("➕ Добавить монету", callback_data="add"))
+    kb.add(types.InlineKeyboardButton("📊 Мои монеты", callback_data="list"))
     return kb
 
 
-# ================== HELPERS ==================
+def coin_menu(pair):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("⚙️ Алерты", callback_data=f"alert:{pair}"),
+        types.InlineKeyboardButton("🗑 Удалить", callback_data=f"del:{pair}")
+    )
+    return kb
 
-def extract_chain_pair(url):
+
+def alert_menu(pair):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("5%", callback_data=f"pct:{pair}:5"),
+        types.InlineKeyboardButton("10%", callback_data=f"pct:{pair}:10"),
+        types.InlineKeyboardButton("20%", callback_data=f"pct:{pair}:20")
+    )
+    kb.add(
+        types.InlineKeyboardButton("⏱ 15м", callback_data=f"tf:{pair}:900"),
+        types.InlineKeyboardButton("⏱ 1ч", callback_data=f"tf:{pair}:3600")
+    )
+    kb.add(types.InlineKeyboardButton("🔕 Вкл/Выкл", callback_data=f"toggle:{pair}"))
+    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="list"))
+    return kb
+
+
+# ================= HELPERS =================
+
+def extract(url):
     m = re.search(r"dexscreener\.com/([a-zA-Z0-9]+)/([a-zA-Z0-9x]+)", url)
     return (m.group(1), m.group(2)) if m else (None, None)
 
 
-def fetch_pair(chain, pair):
+def fetch(chain, pair):
     r = requests.get(f"{DEX_API}/{chain}/{pair}", timeout=10)
-    data = r.json().get("pairs", [])
-    for p in data:
+    for p in r.json().get("pairs", []):
         if p.get("quoteToken", {}).get("symbol") == "USDT":
             return p
     return None
 
 
-def calc_risk(pair):
-    risk = 0
-    if pair.get("liquidity", {}).get("usd", 0) < 20000:
-        risk += 40
-    if pair.get("fdv", 0) > pair.get("liquidity", {}).get("usd", 1) * 20:
-        risk += 30
-    if pair.get("priceChange", {}).get("h1", 0) > 50:
-        risk += 20
-    return min(100, risk)
-
-
-def anti_rug(pair):
-    score = 100
-    if pair.get("liquidity", {}).get("usd", 0) < 10000:
-        score -= 40
-    if pair.get("fdv", 0) == 0:
-        score -= 20
-    if pair.get("txns", {}).get("h1", {}).get("buys", 0) < 5:
-        score -= 20
-    return max(0, score)
-
-
-# ================== BOT HANDLERS ==================
+# ================= BOT =================
 
 @bot.message_handler(commands=["start"])
 def start(m):
     bot.send_message(
         m.chat.id,
         "🚀 *MemCoin Scanner*\n\n"
-        "• алерты ±10% за 1ч\n"
-        "• детект пампов\n"
-        "• риск манипуляций\n"
-        "• anti-rug скоринг\n\n"
-        "Добавь монету 👇",
+        "Inline-интерфейс\n"
+        "Персональные алерты\n\n"
+        "Выбери действие 👇",
         reply_markup=main_menu()
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "➕ Добавить монету")
-def add_prompt(m):
-    bot.send_message(m.chat.id, "🔗 Пришли ссылку Dexscreener (USDT)")
+@bot.callback_query_handler(func=lambda c: c.data == "add")
+def add_prompt(c):
+    bot.answer_callback_query(c.id)
+    bot.send_message(c.message.chat.id, "🔗 Пришли ссылку Dexscreener (USDT)")
 
 
 @bot.message_handler(func=lambda m: m.text and "dexscreener.com" in m.text)
 def add_coin(m):
-    chain, pair = extract_chain_pair(m.text)
-    if not chain:
-        bot.send_message(m.chat.id, "❌ Неверная ссылка", reply_markup=main_menu())
-        return
+    chain, pair = extract(m.text)
+    data = fetch(chain, pair)
 
-    data = fetch_pair(chain, pair)
     if not data:
-        bot.send_message(m.chat.id, "❌ Нет USDT пары", reply_markup=main_menu())
+        bot.send_message(m.chat.id, "❌ Не найдена USDT пара")
         return
 
-    symbol = data["baseToken"]["symbol"]
-    name = data["baseToken"]["name"]
     price = float(data["priceUsd"])
 
     tracked[pair] = {
-        "chat_id": m.chat.id,
+        "chat": m.chat.id,
         "chain": chain,
-        "symbol": symbol,
-        "name": name,
-        "price_1h": price,
-        "last_price": price,
-        "added": time.time()
+        "symbol": data["baseToken"]["symbol"],
+        "name": data["baseToken"]["name"],
+        "base_price": price,
+        "last_check": time.time(),
+        "pct": 10,
+        "tf": 3600,
+        "enabled": True
     }
-    save_data()
+    save()
 
     bot.send_message(
         m.chat.id,
-        f"✅ *{symbol}* ({name}) добавлена\n"
-        f"💰 Цена: `${price}`",
-        reply_markup=main_menu()
+        f"✅ *{tracked[pair]['symbol']}* добавлена",
+        reply_markup=coin_menu(pair)
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "📊 Мои монеты")
-def my_coins(m):
+@bot.callback_query_handler(func=lambda c: c.data == "list")
+def list_coins(c):
+    bot.answer_callback_query(c.id)
     if not tracked:
-        bot.send_message(m.chat.id, "📊 Список пуст", reply_markup=main_menu())
+        bot.send_message(c.message.chat.id, "📊 Список пуст", reply_markup=main_menu())
         return
 
-    text = "📊 *Отслеживаемые монеты:*\n\n"
-    for c in tracked.values():
-        text += f"• {c['symbol']} ({c['name']})\n"
+    for pair, coin in tracked.items():
+        bot.send_message(
+            c.message.chat.id,
+            f"*{coin['symbol']}*\n"
+            f"Алерт: {coin['pct']}% / {coin['tf']//60}м\n"
+            f"{'🟢 Вкл' if coin['enabled'] else '🔴 Выкл'}",
+            reply_markup=coin_menu(pair)
+        )
 
-    bot.send_message(m.chat.id, text, reply_markup=main_menu())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("alert:"))
+def alert_settings(c):
+    pair = c.data.split(":")[1]
+    bot.edit_message_reply_markup(
+        c.message.chat.id,
+        c.message.message_id,
+        reply_markup=alert_menu(pair)
+    )
 
 
-# ================== ALERT ENGINE ==================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pct:"))
+def set_pct(c):
+    _, pair, pct = c.data.split(":")
+    tracked[pair]["pct"] = int(pct)
+    save()
+    bot.answer_callback_query(c.id, f"Порог {pct}%")
 
-def price_watcher():
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("tf:"))
+def set_tf(c):
+    _, pair, tf = c.data.split(":")
+    tracked[pair]["tf"] = int(tf)
+    save()
+    bot.answer_callback_query(c.id, "Таймфрейм обновлён")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("toggle:"))
+def toggle(c):
+    pair = c.data.split(":")[1]
+    tracked[pair]["enabled"] = not tracked[pair]["enabled"]
+    save()
+    bot.answer_callback_query(c.id, "Переключено")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("del:"))
+def delete(c):
+    pair = c.data.split(":")[1]
+    del tracked[pair]
+    save()
+    bot.edit_message_text("🗑 Монета удалена", c.message.chat.id, c.message.message_id)
+
+
+# ================= WATCHER =================
+
+def watcher():
     while True:
-        for pair, c in list(tracked.items()):
-            try:
-                data = fetch_pair(c["chain"], pair)
-                if not data:
-                    continue
+        now = time.time()
+        for pair, c in tracked.items():
+            if not c["enabled"]:
+                continue
 
-                price = float(data["priceUsd"])
-                change_1h = ((price - c["price_1h"]) / c["price_1h"]) * 100
+            data = fetch(c["chain"], pair)
+            if not data:
+                continue
 
-                risk = calc_risk(data)
-                anti = anti_rug(data)
+            price = float(data["priceUsd"])
+            change = ((price - c["base_price"]) / c["base_price"]) * 100
 
-                # памп / дамп
-                if abs(change_1h) >= ALERT_THRESHOLD:
-                    direction = "📈 ПАМП" if change_1h > 0 else "📉 ДАМП"
-                    bot.send_message(
-                        c["chat_id"],
-                        f"{direction} *{c['symbol']}*\n\n"
-                        f"Изменение 1ч: `{change_1h:.2f}%`\n"
-                        f"💰 Цена: `${price}`\n"
-                        f"⚠️ Риск манипуляций: `{risk}%`\n"
-                        f"🧠 Anti-Rug: `{anti}/100`"
-                    )
-                    c["price_1h"] = price
+            if abs(change) >= c["pct"] and now - c["last_check"] >= c["tf"]:
+                bot.send_message(
+                    c["chat"],
+                    f"{'📈 ПАМП' if change > 0 else '📉 ДАМП'} *{c['symbol']}*\n"
+                    f"{change:.2f}% за {c['tf']//60}м\n"
+                    f"Цена: ${price}"
+                )
+                c["base_price"] = price
+                c["last_check"] = now
+                save()
 
-                c["last_price"] = price
-
-            except Exception:
-                pass
-
-        save_data()
-        time.sleep(PRICE_CHECK_INTERVAL)
+        time.sleep(CHECK_INTERVAL)
 
 
-# ================== START ==================
+# ================= START =================
 
-threading.Thread(target=price_watcher, daemon=True).start()
+threading.Thread(target=watcher, daemon=True).start()
 
 bot.remove_webhook()
-print("🤖 Bot polling started")
+print("🤖 Bot started")
 bot.infinity_polling(skip_pending=True)
