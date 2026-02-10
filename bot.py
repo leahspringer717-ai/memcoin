@@ -1,23 +1,27 @@
-import os
-import json
-import time
-import threading
-import requests
 import telebot
-from telebot.types import *
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import requests
+import time
+import json
+import os
+import threading
 
-# ================= CONFIG =================
+# ================== CONFIG ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
-
 DATA_FILE = "data.json"
-CHECK_INTERVAL = 60  # сек
-ALERT_WINDOW = 3600  # 1 час
 
-# ================= STORAGE =================
+PRICE_CHECK_INTERVAL = 60          # секунд
+ALERT_COOLDOWN = 1800              # 30 мин
+# ============================================
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown", disable_web_page_preview=True)
+
+lock = threading.Lock()
+
+# ================== STORAGE ==================
 def load():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -25,8 +29,9 @@ def load():
         return json.load(f)
 
 def save():
-    with open(DATA_FILE, "w") as f:
-        json.dump(DB, f, indent=2)
+    with lock:
+        with open(DATA_FILE, "w") as f:
+            json.dump(DB, f, indent=2)
 
 DB = load()
 
@@ -34,158 +39,176 @@ def user(uid):
     uid = str(uid)
     if uid not in DB:
         DB[uid] = {"coins": {}}
+        save()
     return DB[uid]
 
-# ================= UI =================
-def main_menu():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("➕ Добавить монету")
-    kb.add("📊 Мои монеты", "⚙️ Настройки")
-    return kb
+# ================== DEX ==================
+def parse_dex_link(text):
+    if "dexscreener.com" not in text:
+        return None
 
-def coin_buttons(chain, pair, url):
+    parts = text.split("/")
+    try:
+        chain = parts[3]
+        pair = parts[4]
+        return chain, pair
+    except:
+        return None
+
+def get_dex_data(chain, pair):
+    url = f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair}"
+    r = requests.get(url, timeout=10).json()
+    if not r.get("pair"):
+        return None
+
+    p = r["pair"]
+    if not p["quoteToken"]["symbol"].upper().endswith("USDT"):
+        return None
+
+    return {
+        "symbol": p["baseToken"]["symbol"],
+        "price": float(p["priceUsd"]),
+        "volume": p["volume"]["h1"],
+        "change": p["priceChange"]["h1"],
+        "dex": p["dexId"],
+        "url": p["url"]
+    }
+
+# ================== MEXC ==================
+def get_mexc_price(symbol):
+    try:
+        url = "https://contract.mexc.com/api/v1/contract/ticker"
+        r = requests.get(url, timeout=10).json()
+        pair = f"{symbol}USDT"
+        for i in r.get("data", []):
+            if i["symbol"] == pair:
+                return float(i["lastPrice"])
+    except:
+        pass
+    return None
+
+# ================== UI ==================
+def coin_keyboard(pair, coin):
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("🔗 DEX", url=url))
-    kb.add(InlineKeyboardButton("⚙️ Алерт %", callback_data=f"alert:{chain}:{pair}"))
-    kb.add(InlineKeyboardButton("❌ Удалить", callback_data=f"del:{chain}:{pair}"))
+    kb.row(
+        InlineKeyboardButton("📊 DEX", url=coin["dex_url"]),
+        InlineKeyboardButton("⚡ MEXC %", callback_data=f"mexc:{pair}")
+    )
+    kb.row(
+        InlineKeyboardButton("❌ Удалить", callback_data=f"del:{pair}")
+    )
     return kb
 
-# ================= START =================
+# ================== COMMANDS ==================
 @bot.message_handler(commands=["start"])
 def start(m):
-    bot.send_message(
-        m.chat.id,
-        "🤖 *MemCoinScanner*\n\n"
-        "• Любые сети (ETH / BSC / BASE / ARB)\n"
-        "• Только USDT пары\n"
-        "• Алерты > X% за 1 час\n\n"
-        "Нажми ➕ *Добавить монету* и пришли ссылку DexScreener",
-        reply_markup=main_menu()
+    text = (
+        "🚀 *MEME / DEX ALERT BOT*\n\n"
+        "Что умею:\n"
+        "• Добавление монет через Dexscreener\n"
+        "• Только пары USDT\n"
+        "• Алерты > X% за 1 час\n"
+        "• DEX ↔ MEXC Futures спред\n"
+        "• Anti-spam\n"
+        "• Multi-user\n\n"
+        "📌 Просто пришли ссылку с Dexscreener"
     )
+    bot.send_message(m.chat.id, text)
 
-# ================= ADD FLOW =================
-@bot.message_handler(func=lambda m: m.text == "➕ Добавить монету")
-def ask_link(m):
-    bot.send_message(m.chat.id, "🔗 Пришли ссылку DexScreener")
-
-@bot.message_handler(func=lambda m: "dexscreener.com" in m.text.lower())
+@bot.message_handler(func=lambda m: True)
 def add_coin(m):
-    try:
-        # Telegram preview-safe
-        text = m.text.strip().split()[0]
-        parts = text.split("/")
-
-        chain = parts[-2]
-        pair = parts[-1]
-
-        api = f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair}"
-        r = requests.get(api, timeout=10).json()
-
-        if "pair" not in r:
-            bot.send_message(m.chat.id, "❌ Пара не найдена")
-            return
-
-        p = r["pair"]
-
-        if p["quoteToken"]["symbol"] != "USDT":
-            bot.send_message(m.chat.id, "❌ Поддерживаются только USDT пары")
-            return
-
-        u = user(m.chat.id)
-
-        u["coins"][pair] = {
-            "chain": chain,
-            "symbol": p["baseToken"]["symbol"],
-            "price": float(p["priceUsd"]),
-            "last_price": float(p["priceUsd"]),
-            "alert": 10,
-            "last_alert": 0,
-            "url": p["url"]
-        }
-
-        save()
-
-        bot.send_message(
-            m.chat.id,
-            f"✅ *{p['baseToken']['symbol']}* добавлена\n"
-            f"💰 ${p['priceUsd']}",
-            reply_markup=coin_buttons(chain, pair, p["url"])
-        )
-
-    except Exception as e:
-        bot.send_message(m.chat.id, "❌ Ошибка добавления монеты")
-
-# ================= LIST =================
-@bot.message_handler(func=lambda m: m.text == "📊 Мои монеты")
-def my_coins(m):
-    u = user(m.chat.id)
-    if not u["coins"]:
-        bot.send_message(m.chat.id, "Монет пока нет")
+    parsed = parse_dex_link(m.text)
+    if not parsed:
         return
 
-    for pair, c in u["coins"].items():
-        bot.send_message(
-            m.chat.id,
-            f"🪙 *{c['symbol']}*\n"
-            f"Алерт: {c['alert']}%",
-            reply_markup=coin_buttons(c["chain"], pair, c["url"])
-        )
+    chain, pair = parsed
+    data = get_dex_data(chain, pair)
+    if not data:
+        bot.send_message(m.chat.id, "❌ Не удалось получить данные (нужна пара USDT)")
+        return
 
-# ================= CALLBACKS =================
-@bot.callback_query_handler(func=lambda c: c.data.startswith("del"))
+    u = user(m.chat.id)
+    u["coins"][pair] = {
+        "symbol": data["symbol"],
+        "chain": chain,
+        "last_price": data["price"],
+        "alert": 10,
+        "mexc_alert": None,
+        "last_alert": 0,
+        "last_mexc": 0,
+        "dex_url": data["url"]
+    }
+    save()
+
+    bot.send_message(
+        m.chat.id,
+        f"✅ *{data['symbol']} добавлена*\nЦена: ${data['price']}",
+        reply_markup=coin_keyboard(pair, u["coins"][pair])
+    )
+
+# ================== CALLBACKS ==================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("del:"))
 def delete_coin(c):
-    _, chain, pair = c.data.split(":")
+    pair = c.data.split(":")[1]
     u = user(c.message.chat.id)
     if pair in u["coins"]:
         del u["coins"][pair]
         save()
-        bot.edit_message_text("❌ Монета удалена", c.message.chat.id, c.message.message_id)
+    bot.edit_message_text("❌ Монета удалена", c.message.chat.id, c.message.message_id)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("alert"))
-def change_alert(c):
-    msg = bot.send_message(c.message.chat.id, "✏️ Введи процент алерта (например 15)")
-    bot.register_next_step_handler(msg, set_alert, c.data)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mexc:"))
+def ask_mexc(c):
+    msg = bot.send_message(c.message.chat.id, "Введи % для алерта DEX ↔ MEXC")
+    bot.register_next_step_handler(msg, save_mexc, c.data)
 
-def set_alert(m, data):
+def save_mexc(m, data):
+    pair = data.split(":")[1]
+    u = user(m.chat.id)
     try:
-        _, chain, pair = data.split(":")
-        value = float(m.text)
-        u = user(m.chat.id)
-        u["coins"][pair]["alert"] = value
+        u["coins"][pair]["mexc_alert"] = float(m.text)
         save()
-        bot.send_message(m.chat.id, f"✅ Алерт установлен: {value}%")
+        bot.send_message(m.chat.id, "⚡ MEXC алерт включён")
     except:
-        bot.send_message(m.chat.id, "❌ Неверное значение")
+        bot.send_message(m.chat.id, "❌ Введи число")
 
-# ================= WATCHER =================
+# ================== WATCHER ==================
 def watcher():
     while True:
         for uid, u in DB.items():
-            for pair, c in u["coins"].items():
-                try:
-                    api = f"https://api.dexscreener.com/latest/dex/pairs/{c['chain']}/{pair}"
-                    r = requests.get(api, timeout=10).json()
-                    if "pair" not in r:
-                        continue
+            for pair, coin in u["coins"].items():
+                data = get_dex_data(coin["chain"], pair)
+                if not data:
+                    continue
 
-                    price = float(r["pair"]["priceUsd"])
-                    diff = ((price - c["last_price"]) / c["last_price"]) * 100
-                    now = time.time()
+                old = coin["last_price"]
+                new = data["price"]
+                coin["last_price"] = new
 
-                    if abs(diff) >= c["alert"] and now - c["last_alert"] >= ALERT_WINDOW:
-                        bot.send_message(
-                            uid,
-                            f"🚨 *{c['symbol']}*\n"
-                            f"Цена: ${price:.6f}\n"
-                            f"Изм: {diff:.2f}%",
-                            reply_markup=coin_buttons(c["chain"], pair, c["url"])
-                        )
-                        c["last_alert"] = now
-                        c["last_price"] = price
-                        save()
-                except:
-                    pass
-        time.sleep(CHECK_INTERVAL)
+                now = time.time()
 
+                change = (new - old) / old * 100
+                if abs(change) >= coin["alert"] and now - coin["last_alert"] > ALERT_COOLDOWN:
+                    bot.send_message(
+                        uid,
+                        f"🚨 *{coin['symbol']}*\nИзменение за 1ч: {change:+.2f}%\nЦена: ${new}"
+                    )
+                    coin["last_alert"] = now
+
+                if coin["mexc_alert"]:
+                    mexc = get_mexc_price(coin["symbol"])
+                    if mexc:
+                        spread = (mexc - new) / new * 100
+                        if abs(spread) >= coin["mexc_alert"] and now - coin["last_mexc"] > ALERT_COOLDOWN:
+                            bot.send_message(
+                                uid,
+                                f"⚡ *DEX ↔ MEXC*\n{coin['symbol']}\n"
+                                f"DEX: ${new}\nMEXC: ${mexc}\nСпред: {spread:+.2f}%"
+                            )
+                            coin["last_mexc"] = now
+
+                save()
+        time.sleep(PRICE_CHECK_INTERVAL)
+
+# ================== START ==================
 threading.Thread(target=watcher, daemon=True).start()
 bot.infinity_polling(skip_pending=True)
