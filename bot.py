@@ -15,7 +15,7 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
 
 DATA_FILE = "data.json"
-CHECK_INTERVAL = 60  # секунд
+CHECK_INTERVAL = 60
 # ============================================
 
 bot = telebot.TeleBot(
@@ -64,9 +64,10 @@ def coin_keyboard(pair, coin):
     kb = InlineKeyboardMarkup()
     kb.row(
         InlineKeyboardButton("📊 DEX", url=coin["dex_url"]),
-        InlineKeyboardButton("⚡ MEXC %", callback_data=f"mexc:{pair}")
+        InlineKeyboardButton("📈 Цена %", callback_data=f"price:{pair}")
     )
     kb.row(
+        InlineKeyboardButton("⚡ MEXC %", callback_data=f"mexc:{pair}"),
         InlineKeyboardButton("❌ Удалить", callback_data=f"del:{pair}")
     )
     return kb
@@ -82,9 +83,11 @@ def parse_dex_link(text):
         return None
 
 def get_dex_data(chain, pair):
-    url = f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair}"
     try:
-        r = requests.get(url, timeout=10).json()
+        r = requests.get(
+            f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair}",
+            timeout=10
+        ).json()
         p = r.get("pair")
         if not p:
             return None
@@ -93,8 +96,6 @@ def get_dex_data(chain, pair):
         return {
             "symbol": p["baseToken"]["symbol"],
             "price": float(p["priceUsd"]),
-            "change": p["priceChange"]["h1"],
-            "dex": p["dexId"],
             "url": p["url"]
         }
     except:
@@ -115,20 +116,18 @@ def get_mexc_price(symbol):
         pass
     return None
 
-# ================== COMMANDS ==================
+# ================== START ==================
 @bot.message_handler(commands=["start"])
 def start(m):
-    text = (
+    bot.send_message(
+        m.chat.id,
         "🚀 *DEX / MEME ALERT BOT*\n\n"
-        "Функции:\n"
-        "• Алерты > X% за 1 час (мгновенно)\n"
-        "• DEX ↔ MEXC Futures спред\n"
-        "• Только USDT пары\n"
-        "• Multi-user\n"
-        "• Anti-spam\n\n"
-        "📌 Добавляй монету ссылкой с Dexscreener"
+        "• Мгновенные алерты по %\n"
+        "• Отдельно: цена и DEX↔MEXC\n"
+        "• Только USDT пары\n\n"
+        "📌 Добавь монету ссылкой Dexscreener",
+        reply_markup=main_menu()
     )
-    bot.send_message(m.chat.id, text, reply_markup=main_menu())
 
 # ================== TEXT HANDLER ==================
 @bot.message_handler(func=lambda m: True)
@@ -136,11 +135,7 @@ def text_handler(m):
     u = get_user(m.chat.id)
 
     if m.text == "➕ Добавить монету":
-        bot.send_message(
-            m.chat.id,
-            "🔗 Пришли ссылку с Dexscreener",
-            reply_markup=main_menu()
-        )
+        bot.send_message(m.chat.id, "🔗 Пришли ссылку Dexscreener", reply_markup=main_menu())
         return
 
     if m.text == "📂 Мои монеты":
@@ -153,22 +148,22 @@ def text_handler(m):
             f"📂 Добавлено монет: *{len(u['coins'])}*",
             reply_markup=main_menu()
         )
+
         for pair, coin in u["coins"].items():
+            mexc_txt = f"{coin['mexc_alert']}%" if coin["mexc_alert"] else "—"
+
+            text = (
+                f"*{coin['symbol']}*\n"
+                f"Цена: ${coin['last_price']}\n"
+                f"📈 Цена: {coin['alert']}%\n"
+                f"⚡ DEX↔MEXC: {mexc_txt}"
+            )
+
             bot.send_message(
                 m.chat.id,
-                f"*{coin['symbol']}*\nЦена: ${coin['last_price']}",
+                text,
                 reply_markup=coin_keyboard(pair, coin)
             )
-        return
-
-    if m.text == "ℹ️ О боте":
-        bot.send_message(
-            m.chat.id,
-            "🤖 Бот для пампов и арбитража\n"
-            "DEX + Futures\n"
-            "Railway / VPS ready",
-            reply_markup=main_menu()
-        )
         return
 
     parsed = parse_dex_link(m.text)
@@ -185,7 +180,7 @@ def text_handler(m):
         "symbol": data["symbol"],
         "chain": chain,
         "last_price": data["price"],
-        "alert": 10,
+        "alert": 10,                 # 👈 price alert %
         "mexc_alert": None,
         "price_triggered": False,
         "mexc_triggered": False,
@@ -209,6 +204,22 @@ def delete_coin(c):
         save_db()
     bot.edit_message_text("❌ Монета удалена", c.message.chat.id, c.message.message_id)
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("price:"))
+def ask_price_alert(c):
+    msg = bot.send_message(c.message.chat.id, "📈 Введи % для алерта цены")
+    bot.register_next_step_handler(msg, save_price_alert, c.data)
+
+def save_price_alert(m, data):
+    pair = data.split(":")[1]
+    u = get_user(m.chat.id)
+    try:
+        u["coins"][pair]["alert"] = float(m.text)
+        u["coins"][pair]["price_triggered"] = False
+        save_db()
+        bot.send_message(m.chat.id, "✅ Алерт цены обновлён", reply_markup=main_menu())
+    except:
+        bot.send_message(m.chat.id, "❌ Введи число")
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("mexc:"))
 def mexc_prompt(c):
     msg = bot.send_message(c.message.chat.id, "⚡ Введи % для DEX ↔ MEXC")
@@ -219,8 +230,9 @@ def save_mexc(m, data):
     u = get_user(m.chat.id)
     try:
         u["coins"][pair]["mexc_alert"] = float(m.text)
+        u["coins"][pair]["mexc_triggered"] = False
         save_db()
-        bot.send_message(m.chat.id, "✅ MEXC алерт установлен", reply_markup=main_menu())
+        bot.send_message(m.chat.id, "✅ MEXC алерт обновлён", reply_markup=main_menu())
     except:
         bot.send_message(m.chat.id, "❌ Введи число")
 
@@ -239,7 +251,6 @@ def watcher():
 
                 change = (new - old) / old * 100
 
-                # ---- PRICE ALERT (INSTANT) ----
                 if abs(change) >= coin["alert"] and not coin["price_triggered"]:
                     bot.send_message(
                         uid,
@@ -250,7 +261,6 @@ def watcher():
                 if abs(change) < coin["alert"]:
                     coin["price_triggered"] = False
 
-                # ---- MEXC ALERT ----
                 if coin["mexc_alert"]:
                     mexc = get_mexc_price(coin["symbol"])
                     if mexc:
