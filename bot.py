@@ -278,11 +278,30 @@ def watcher():
                     bot.send_message(uid, f"📈 {coin['symbol']} изменился на {round(change,2)}%")
                     coin["start_price"] = price
 
-                # MEXC alert
-                if coin["mexc_alert"] and mexc_price:
-                    spread = (mexc_price - price) / price * 100
-                    if abs(spread) >= coin["mexc_alert"]:
-                        bot.send_message(uid, f"⚡ {coin['symbol']} DEX↔MEXC {round(spread,2)}%")
+               # ===== SPREAD MONITOR =====
+if coin.get("mexc_alert") and mexc_price:
+
+    spread = (mexc_price - price) / price * 100
+    threshold = coin["mexc_alert"]
+
+    if abs(spread) >= threshold and not coin.get("spread_triggered", False):
+
+        direction = "Long bias" if spread > 0 else "Short bias"
+
+        bot.send_message(
+            uid,
+            f"⚡ *SPREAD ALERT — {coin['symbol']}*\n\n"
+            f"DEX Price: ${price}\n"
+            f"MEXC Price: ${mexc_price}\n\n"
+            f"Spread: {round(spread,2)}%\n"
+            f"Bias: {direction}"
+        )
+
+        coin["spread_triggered"] = True
+
+    # сброс анти-спама
+    if abs(spread) < threshold * 0.7:
+        coin["spread_triggered"] = False
 
                 # Engine history
                 coin["history"].append({
