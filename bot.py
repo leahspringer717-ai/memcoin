@@ -28,7 +28,7 @@ bot = telebot.TeleBot(
 )
 
 lock = threading.Lock()
-user_states = {}  # для ввода процентов
+user_states = {}
 
 # ================== STORAGE ==================
 def load_db():
@@ -58,16 +58,14 @@ def main_menu():
         KeyboardButton("➕ Добавить монету"),
         KeyboardButton("📂 Мои монеты")
     )
-    kb.row(
-        KeyboardButton("ℹ️ О боте")
-    )
+    kb.row(KeyboardButton("ℹ️ О боте"))
     return kb
 
 def coin_keyboard(pair):
     kb = InlineKeyboardMarkup()
     kb.row(
         InlineKeyboardButton("📈 Цена %", callback_data=f"setprice:{pair}"),
-        InlineKeyboardButton("⚡ MEXC %", callback_data=f"setmexc:{pair}")
+        InlineKeyboardButton("⚡ Спред %", callback_data=f"setmexc:{pair}")
     )
     kb.row(
         InlineKeyboardButton("❌ Удалить", callback_data=f"del:{pair}")
@@ -163,8 +161,8 @@ def start(m):
         "• ⚡ Алерты по спреду DEX ↔ MEXC\n"
         "• 🧠 Hybrid Market Engine (30m + 5m + Volume + Futures)\n"
         "• 🚀 Авто-сигнал при сильном импульсе\n"
+        "• 🛡 Anti-spam защита\n"
         "• 👥 Multi-user\n"
-        "• 🛡 Anti-spam\n"
         "• ✅ Только USDT пары\n\n"
         "Добавь ссылку Dexscreener.",
         reply_markup=main_menu()
@@ -180,13 +178,13 @@ def callback(call):
     if data.startswith("setprice:"):
         pair = data.split(":")[1]
         user_states[uid] = ("price", pair)
-        bot.send_message(uid, "Введи % изменения цены для алерта:")
+        bot.send_message(uid, "Введи % изменения цены:")
         return
 
     if data.startswith("setmexc:"):
         pair = data.split(":")[1]
         user_states[uid] = ("mexc", pair)
-        bot.send_message(uid, "Введи % спреда DEX ↔ MEXC для алерта:")
+        bot.send_message(uid, "Введи % спреда DEX ↔ MEXC:")
         return
 
     if data.startswith("del:"):
@@ -203,7 +201,6 @@ def text_handler(m):
     uid = str(m.chat.id)
     user = get_user(uid)
 
-    # Ввод процентов
     if uid in user_states:
         mode, pair = user_states[uid]
         try:
@@ -229,7 +226,7 @@ def text_handler(m):
                 uid,
                 f"*{coin['symbol']}*\n"
                 f"Цена alert: {coin.get('alert','-')}%\n"
-                f"MEXC alert: {coin.get('mexc_alert','-')}%\n"
+                f"Спред alert: {coin.get('mexc_alert','-')}%\n"
                 f"Engine: {coin.get('last_score',0)}",
                 reply_markup=coin_keyboard(pair)
             )
@@ -252,6 +249,7 @@ def text_handler(m):
             "mexc_alert": None,
             "history": [],
             "engine_triggered": False,
+            "spread_triggered": False,
             "last_score": 0
         }
         save_db()
@@ -263,6 +261,7 @@ def watcher():
     while True:
         for uid, u in DB.items():
             for pair, coin in u["coins"].items():
+
                 data = get_dex_data(coin["chain"], pair)
                 if not data:
                     continue
@@ -271,43 +270,48 @@ def watcher():
                 volume = data["volume"]
                 mexc_price = get_mexc_price(coin["symbol"])
 
-                # Price alert
+                # ===== PRICE ALERT =====
                 start_price = coin["start_price"]
                 change = (price - start_price) / start_price * 100
+
                 if abs(change) >= coin["alert"]:
-                    bot.send_message(uid, f"📈 {coin['symbol']} изменился на {round(change,2)}%")
+                    bot.send_message(
+                        uid,
+                        f"📈 *PRICE ALERT — {coin['symbol']}*\n"
+                        f"Change: {round(change,2)}%"
+                    )
                     coin["start_price"] = price
 
-               # ===== SPREAD MONITOR =====
-if coin.get("mexc_alert") and mexc_price:
+                # ===== SPREAD MONITOR =====
+                if coin.get("mexc_alert") and mexc_price:
 
-    spread = (mexc_price - price) / price * 100
-    threshold = coin["mexc_alert"]
+                    spread = (mexc_price - price) / price * 100
+                    threshold = coin["mexc_alert"]
 
-    if abs(spread) >= threshold and not coin.get("spread_triggered", False):
+                    if abs(spread) >= threshold and not coin.get("spread_triggered", False):
 
-        direction = "Long bias" if spread > 0 else "Short bias"
+                        direction = "Long bias" if spread > 0 else "Short bias"
 
-        bot.send_message(
-            uid,
-            f"⚡ *SPREAD ALERT — {coin['symbol']}*\n\n"
-            f"DEX Price: ${price}\n"
-            f"MEXC Price: ${mexc_price}\n\n"
-            f"Spread: {round(spread,2)}%\n"
-            f"Bias: {direction}"
-        )
+                        bot.send_message(
+                            uid,
+                            f"⚡ *SPREAD ALERT — {coin['symbol']}*\n\n"
+                            f"DEX: ${price}\n"
+                            f"MEXC: ${mexc_price}\n"
+                            f"Spread: {round(spread,2)}%\n"
+                            f"Bias: {direction}"
+                        )
 
-        coin["spread_triggered"] = True
+                        coin["spread_triggered"] = True
 
-    # сброс анти-спама
-    if abs(spread) < threshold * 0.7:
-        coin["spread_triggered"] = False
+                    if abs(spread) < threshold * 0.7:
+                        coin["spread_triggered"] = False
 
-                # Engine history
+                # ===== ENGINE =====
                 coin["history"].append({
                     "price": price,
                     "volume": volume
                 })
+
                 if len(coin["history"]) > MAX_HISTORY:
                     coin["history"].pop(0)
 
@@ -315,7 +319,11 @@ if coin.get("mexc_alert") and mexc_price:
                 coin["last_score"] = score
 
                 if score >= ENGINE_SIGNAL_THRESHOLD and not coin["engine_triggered"]:
-                    bot.send_message(uid, f"🚀 STRONG MOMENTUM {coin['symbol']} | Score {score}")
+                    bot.send_message(
+                        uid,
+                        f"🚀 *STRONG MOMENTUM — {coin['symbol']}*\n"
+                        f"Engine Score: {score}/100"
+                    )
                     coin["engine_triggered"] = True
 
                 if score < ENGINE_RESET_THRESHOLD:
