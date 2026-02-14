@@ -156,7 +156,7 @@ def start(m):
         "🚀 *DEX MEME ENGINE BOT*\n\n"
         "*Функционал:*\n"
         "• 📈 Алерты по % изменения цены\n"
-        "• ⚡ Алерты по спреду DEX ↔ MEXC (если доступно)\n"
+        "• ⚡ Алерты по спреду DEX ↔ MEXC\n"
         "• 🧠 Hybrid Market Engine\n"
         "• 🚀 Авто-сигнал импульса\n"
         "• 👥 Multi-user\n"
@@ -196,9 +196,14 @@ def callback(call):
 # ================== TEXT ==================
 @bot.message_handler(func=lambda m: True)
 def text_handler(m):
+
+    if not m.text:
+        return
+
     uid = str(m.chat.id)
     user = get_user(uid)
 
+    # ==== SETTINGS INPUT ====
     if uid in user_states:
         mode, pair = user_states[uid]
         try:
@@ -214,22 +219,40 @@ def text_handler(m):
         del user_states[uid]
         return
 
-    if m.text == "➕ Добавить монету":
+    # ==== ADD COIN BUTTON ====
+    if "Добавить" in m.text:
         bot.send_message(uid, "Пришли ссылку Dexscreener.")
         return
 
-    if m.text == "📂 Мои монеты":
-        for pair, coin in user["coins"].items():
+    # ==== MY COINS BUTTON ====
+    if "Мои монеты" in m.text:
+
+        coins = user.get("coins", {})
+
+        if not coins:
+            bot.send_message(uid, "У тебя пока нет добавленных монет.")
+            return
+
+        for pair, coin in coins.items():
+
+            symbol = coin.get("symbol", "Unknown")
+            quote = coin.get("quote_symbol", "?")
+            price_alert = coin.get("alert", "-")
+            spread_alert = coin.get("mexc_alert", "-")
+            score = coin.get("last_score", 0)
+
             bot.send_message(
                 uid,
-                f"*{coin['symbol']}/{coin.get('quote_symbol','?')}*\n"
-                f"Цена alert: {coin.get('alert','-')}%\n"
-                f"Спред alert: {coin.get('mexc_alert','-')}%\n"
-                f"Engine: {coin.get('last_score',0)}",
+                f"*{symbol}/{quote}*\n"
+                f"Цена alert: {price_alert}%\n"
+                f"Спред alert: {spread_alert}%\n"
+                f"Engine: {score}/100",
                 reply_markup=coin_keyboard(pair)
             )
+
         return
 
+    # ==== ADD BY LINK ====
     parsed = parse_dex_link(m.text)
     if parsed:
         chain, pair = parsed
@@ -268,19 +291,18 @@ def watcher():
                 volume = data["volume"]
                 mexc_price = get_mexc_price(coin["symbol"])
 
-                # ===== PRICE ALERT =====
+                # PRICE ALERT
                 start_price = coin["start_price"]
                 change = (price - start_price) / start_price * 100
 
                 if abs(change) >= coin["alert"]:
                     bot.send_message(
                         uid,
-                        f"📈 *PRICE ALERT — {coin['symbol']}*\n"
-                        f"Change: {round(change,2)}%"
+                        f"📈 *PRICE ALERT — {coin['symbol']}*\nChange: {round(change,2)}%"
                     )
                     coin["start_price"] = price
 
-                # ===== SPREAD =====
+                # SPREAD ALERT
                 if coin.get("mexc_alert") and mexc_price:
 
                     spread = (mexc_price - price) / price * 100
@@ -304,7 +326,7 @@ def watcher():
                     if abs(spread) < threshold * 0.7:
                         coin["spread_triggered"] = False
 
-                # ===== ENGINE =====
+                # ENGINE
                 coin["history"].append({
                     "price": price,
                     "volume": volume
@@ -319,8 +341,7 @@ def watcher():
                 if score >= ENGINE_SIGNAL_THRESHOLD and not coin["engine_triggered"]:
                     bot.send_message(
                         uid,
-                        f"🚀 *STRONG MOMENTUM — {coin['symbol']}*\n"
-                        f"Engine Score: {score}/100"
+                        f"🚀 *STRONG MOMENTUM — {coin['symbol']}*\nEngine Score: {score}/100"
                     )
                     coin["engine_triggered"] = True
 
