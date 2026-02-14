@@ -28,6 +28,7 @@ bot = telebot.TeleBot(
 )
 
 lock = threading.Lock()
+user_states = {}  # для ввода процентов
 
 # ================== STORAGE ==================
 def load_db():
@@ -58,19 +59,17 @@ def main_menu():
         KeyboardButton("📂 Мои монеты")
     )
     kb.row(
-        KeyboardButton("⚙️ Настройки"),
         KeyboardButton("ℹ️ О боте")
     )
     return kb
 
-def coin_keyboard(pair, coin):
+def coin_keyboard(pair):
     kb = InlineKeyboardMarkup()
     kb.row(
-        InlineKeyboardButton("📊 DEX", url=coin["dex_url"]),
-        InlineKeyboardButton("📈 Цена %", callback_data=f"price:{pair}")
+        InlineKeyboardButton("📈 Цена %", callback_data=f"setprice:{pair}"),
+        InlineKeyboardButton("⚡ MEXC %", callback_data=f"setmexc:{pair}")
     )
     kb.row(
-        InlineKeyboardButton("⚡ MEXC %", callback_data=f"mexc:{pair}"),
         InlineKeyboardButton("❌ Удалить", callback_data=f"del:{pair}")
     )
     return kb
@@ -136,54 +135,22 @@ def calculate_engine(coin, mexc_price):
     vol_now = history[-1]["volume"]
     vol_old = history[0]["volume"]
 
-    # 30m Trend (40)
     trend = (price_now - price_30m_ago) / price_30m_ago * 100
-    if trend > 10:
-        trend_score = 40
-    elif trend > 5:
-        trend_score = 30
-    elif trend > 2:
-        trend_score = 20
-    elif trend > 0:
-        trend_score = 10
-    else:
-        trend_score = 0
+    trend_score = 40 if trend > 10 else 30 if trend > 5 else 20 if trend > 2 else 10 if trend > 0 else 0
 
-    # 5m acceleration (20)
     accel = (price_now - price_5m_ago) / price_5m_ago * 100
     accel_score = min(max(accel * 4, 0), 20)
 
-    # Volume expansion (20)
-    if vol_old > 0:
-        vol_change = (vol_now - vol_old) / vol_old * 100
-    else:
-        vol_change = 0
+    vol_change = (vol_now - vol_old) / vol_old * 100 if vol_old > 0 else 0
+    vol_score = 20 if trend > 0 and vol_change > 10 else 15 if trend > 0 else 0
 
-    if trend > 0 and vol_change > 10:
-        vol_score = 20
-    elif trend > 0 and vol_change > 0:
-        vol_score = 15
-    elif trend < 0 and vol_change > 10:
-        vol_score = 5
-    else:
-        vol_score = 0
-
-    # Futures bias (20)
     if mexc_price:
         spread = (mexc_price - price_now) / price_now * 100
-        if spread > 2:
-            fut_score = 20
-        elif spread > 1:
-            fut_score = 15
-        elif spread > 0:
-            fut_score = 10
-        else:
-            fut_score = 0
+        fut_score = 20 if spread > 2 else 15 if spread > 1 else 10 if spread > 0 else 0
     else:
         fut_score = 0
 
-    total = trend_score + accel_score + vol_score + fut_score
-    return round(total, 2)
+    return round(trend_score + accel_score + vol_score + fut_score, 2)
 
 # ================== START ==================
 @bot.message_handler(commands=["start"])
@@ -191,64 +158,105 @@ def start(m):
     bot.send_message(
         m.chat.id,
         "🚀 *DEX MEME ENGINE BOT*\n\n"
-        "Hybrid Market Engine + Auto Signals\n\n"
-        "Добавь ссылку Dexscreener (USDT)",
+        "*Функционал:*\n"
+        "• 📈 Алерты по % изменения цены\n"
+        "• ⚡ Алерты по спреду DEX ↔ MEXC\n"
+        "• 🧠 Hybrid Market Engine (30m + 5m + Volume + Futures)\n"
+        "• 🚀 Авто-сигнал при сильном импульсе\n"
+        "• 👥 Multi-user\n"
+        "• 🛡 Anti-spam\n"
+        "• ✅ Только USDT пары\n\n"
+        "Добавь ссылку Dexscreener.",
         reply_markup=main_menu()
     )
+
+# ================== CALLBACK ==================
+@bot.callback_query_handler(func=lambda call: True)
+def callback(call):
+    uid = str(call.message.chat.id)
+    user = get_user(uid)
+    data = call.data
+
+    if data.startswith("setprice:"):
+        pair = data.split(":")[1]
+        user_states[uid] = ("price", pair)
+        bot.send_message(uid, "Введи % изменения цены для алерта:")
+        return
+
+    if data.startswith("setmexc:"):
+        pair = data.split(":")[1]
+        user_states[uid] = ("mexc", pair)
+        bot.send_message(uid, "Введи % спреда DEX ↔ MEXC для алерта:")
+        return
+
+    if data.startswith("del:"):
+        pair = data.split(":")[1]
+        if pair in user["coins"]:
+            del user["coins"][pair]
+            save_db()
+            bot.send_message(uid, "Монета удалена.")
+        return
 
 # ================== TEXT ==================
 @bot.message_handler(func=lambda m: True)
 def text_handler(m):
-    u = get_user(m.chat.id)
+    uid = str(m.chat.id)
+    user = get_user(uid)
+
+    # Ввод процентов
+    if uid in user_states:
+        mode, pair = user_states[uid]
+        try:
+            value = float(m.text)
+            if mode == "price":
+                user["coins"][pair]["alert"] = value
+            else:
+                user["coins"][pair]["mexc_alert"] = value
+            save_db()
+            bot.send_message(uid, "✅ Сохранено.")
+        except:
+            bot.send_message(uid, "Нужно число.")
+        del user_states[uid]
+        return
 
     if m.text == "➕ Добавить монету":
-        bot.send_message(m.chat.id, "Пришли ссылку Dexscreener", reply_markup=main_menu())
+        bot.send_message(uid, "Пришли ссылку Dexscreener.")
         return
 
     if m.text == "📂 Мои монеты":
-        if not u["coins"]:
-            bot.send_message(m.chat.id, "Монет нет", reply_markup=main_menu())
-            return
-
-        for pair, coin in u["coins"].items():
+        for pair, coin in user["coins"].items():
             bot.send_message(
-                m.chat.id,
+                uid,
                 f"*{coin['symbol']}*\n"
-                f"Цена %: {coin['alert']}%\n"
-                f"MEXC %: {coin['mexc_alert'] or '-'}%\n"
-                f"Engine Score: {coin.get('last_score',0)}",
-                reply_markup=coin_keyboard(pair, coin)
+                f"Цена alert: {coin.get('alert','-')}%\n"
+                f"MEXC alert: {coin.get('mexc_alert','-')}%\n"
+                f"Engine: {coin.get('last_score',0)}",
+                reply_markup=coin_keyboard(pair)
             )
         return
 
     parsed = parse_dex_link(m.text)
-    if not parsed:
-        return
+    if parsed:
+        chain, pair = parsed
+        data = get_dex_data(chain, pair)
+        if not data:
+            bot.send_message(uid, "Нужна USDT пара.")
+            return
 
-    chain, pair = parsed
-    data = get_dex_data(chain, pair)
-    if not data:
-        bot.send_message(m.chat.id, "Нужна USDT пара")
-        return
+        user["coins"][pair] = {
+            "symbol": data["symbol"],
+            "chain": chain,
+            "start_price": data["price"],
+            "last_price": data["price"],
+            "alert": 10,
+            "mexc_alert": None,
+            "history": [],
+            "engine_triggered": False,
+            "last_score": 0
+        }
+        save_db()
 
-    u["coins"][pair] = {
-        "symbol": data["symbol"],
-        "chain": chain,
-        "last_price": data["price"],
-        "alert": 10,
-        "mexc_alert": None,
-        "dex_url": data["url"],
-        "history": [],
-        "engine_triggered": False,
-        "last_score": 0
-    }
-    save_db()
-
-    bot.send_message(
-        m.chat.id,
-        f"✅ {data['symbol']} добавлена",
-        reply_markup=coin_keyboard(pair, u["coins"][pair])
-    )
+        bot.send_message(uid, f"✅ {data['symbol']} добавлена.")
 
 # ================== WATCHER ==================
 def watcher():
@@ -263,12 +271,24 @@ def watcher():
                 volume = data["volume"]
                 mexc_price = get_mexc_price(coin["symbol"])
 
+                # Price alert
+                start_price = coin["start_price"]
+                change = (price - start_price) / start_price * 100
+                if abs(change) >= coin["alert"]:
+                    bot.send_message(uid, f"📈 {coin['symbol']} изменился на {round(change,2)}%")
+                    coin["start_price"] = price
+
+                # MEXC alert
+                if coin["mexc_alert"] and mexc_price:
+                    spread = (mexc_price - price) / price * 100
+                    if abs(spread) >= coin["mexc_alert"]:
+                        bot.send_message(uid, f"⚡ {coin['symbol']} DEX↔MEXC {round(spread,2)}%")
+
+                # Engine history
                 coin["history"].append({
                     "price": price,
-                    "volume": volume,
-                    "ts": int(time.time())
+                    "volume": volume
                 })
-
                 if len(coin["history"]) > MAX_HISTORY:
                     coin["history"].pop(0)
 
@@ -276,24 +296,16 @@ def watcher():
                 coin["last_score"] = score
 
                 if score >= ENGINE_SIGNAL_THRESHOLD and not coin["engine_triggered"]:
-                    bot.send_message(
-                        uid,
-                        f"🚀 *STRONG MOMENTUM — {coin['symbol']}*\n"
-                        f"Engine Score: {score}/100\n"
-                        f"Цена: ${price}"
-                    )
+                    bot.send_message(uid, f"🚀 STRONG MOMENTUM {coin['symbol']} | Score {score}")
                     coin["engine_triggered"] = True
 
                 if score < ENGINE_RESET_THRESHOLD:
                     coin["engine_triggered"] = False
 
-                coin["last_price"] = price
-
                 save_db()
 
         time.sleep(CHECK_INTERVAL)
 
-# ================== START ==================
 threading.Thread(target=watcher, daemon=True).start()
 bot.remove_webhook()
 bot.infinity_polling(skip_pending=True)
