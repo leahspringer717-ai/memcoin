@@ -93,13 +93,11 @@ def get_dex_data(chain, pair):
         if not p:
             return None
 
-        if not p["quoteToken"]["symbol"].upper().endswith("USDT"):
-            return None
-
         return {
             "symbol": p["baseToken"]["symbol"],
             "price": float(p["priceUsd"]),
             "volume": float(p.get("volume", {}).get("h24", 0)),
+            "quote_symbol": p["quoteToken"]["symbol"],
             "url": p["url"]
         }
     except:
@@ -158,12 +156,12 @@ def start(m):
         "🚀 *DEX MEME ENGINE BOT*\n\n"
         "*Функционал:*\n"
         "• 📈 Алерты по % изменения цены\n"
-        "• ⚡ Алерты по спреду DEX ↔ MEXC\n"
-        "• 🧠 Hybrid Market Engine (30m + 5m + Volume + Futures)\n"
-        "• 🚀 Авто-сигнал при сильном импульсе\n"
-        "• 🛡 Anti-spam защита\n"
+        "• ⚡ Алерты по спреду DEX ↔ MEXC (если доступно)\n"
+        "• 🧠 Hybrid Market Engine\n"
+        "• 🚀 Авто-сигнал импульса\n"
         "• 👥 Multi-user\n"
-        "• ✅ Только USDT пары\n\n"
+        "• 🛡 Anti-spam\n"
+        "• ✅ Любые пары Dexscreener\n\n"
         "Добавь ссылку Dexscreener.",
         reply_markup=main_menu()
     )
@@ -224,7 +222,7 @@ def text_handler(m):
         for pair, coin in user["coins"].items():
             bot.send_message(
                 uid,
-                f"*{coin['symbol']}*\n"
+                f"*{coin['symbol']}/{coin.get('quote_symbol','?')}*\n"
                 f"Цена alert: {coin.get('alert','-')}%\n"
                 f"Спред alert: {coin.get('mexc_alert','-')}%\n"
                 f"Engine: {coin.get('last_score',0)}",
@@ -237,14 +235,14 @@ def text_handler(m):
         chain, pair = parsed
         data = get_dex_data(chain, pair)
         if not data:
-            bot.send_message(uid, "Нужна USDT пара.")
+            bot.send_message(uid, "Пара не найдена.")
             return
 
         user["coins"][pair] = {
             "symbol": data["symbol"],
+            "quote_symbol": data["quote_symbol"],
             "chain": chain,
             "start_price": data["price"],
-            "last_price": data["price"],
             "alert": 10,
             "mexc_alert": None,
             "history": [],
@@ -254,7 +252,7 @@ def text_handler(m):
         }
         save_db()
 
-        bot.send_message(uid, f"✅ {data['symbol']} добавлена.")
+        bot.send_message(uid, f"✅ {data['symbol']}/{data['quote_symbol']} добавлена.")
 
 # ================== WATCHER ==================
 def watcher():
@@ -282,19 +280,19 @@ def watcher():
                     )
                     coin["start_price"] = price
 
-                # ===== SPREAD MONITOR =====
+                # ===== SPREAD =====
                 if coin.get("mexc_alert") and mexc_price:
 
                     spread = (mexc_price - price) / price * 100
                     threshold = coin["mexc_alert"]
 
-                    if abs(spread) >= threshold and not coin.get("spread_triggered", False):
+                    if abs(spread) >= threshold and not coin["spread_triggered"]:
 
                         direction = "Long bias" if spread > 0 else "Short bias"
 
                         bot.send_message(
                             uid,
-                            f"⚡ *SPREAD ALERT — {coin['symbol']}*\n\n"
+                            f"⚡ *SPREAD ALERT — {coin['symbol']}*\n"
                             f"DEX: ${price}\n"
                             f"MEXC: ${mexc_price}\n"
                             f"Spread: {round(spread,2)}%\n"
